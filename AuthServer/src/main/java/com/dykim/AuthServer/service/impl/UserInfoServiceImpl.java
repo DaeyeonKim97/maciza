@@ -51,4 +51,22 @@ public class UserInfoServiceImpl implements UserInfoService{
         }
         return otherUserList;
     }
+
+    @Override
+    public List<OtherUser> getMatchUsersInfo(String userName) {
+        List<User> userList = repository.findByUserNameContaining(userName);
+        List<OtherUser> otherUserList = new ArrayList<>();
+
+        for(User user : userList){
+            otherUserList.add(new OtherUser(
+                    user.getId(),
+                    user.getUserName(),
+                    user.getName(),
+                    user.getEmail(),
+                    user.getProfileImgSrc(),
+                    user.getIsDeleted()
+            ));
+        }
+        return otherUserList;
+    }
 }

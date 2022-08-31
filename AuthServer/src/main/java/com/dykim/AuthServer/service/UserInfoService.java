@@ -7,4 +7,6 @@ import java.util.List;
 public interface UserInfoService {
     OtherUser getUserInfo(int id);
     List<OtherUser> getAllUsersInfo();
+
+    List<OtherUser> getMatchUsersInfo(String userName);
 }

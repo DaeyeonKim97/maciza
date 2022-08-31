@@ -1,6 +1,7 @@
 package com.dykim.AuthServer.controller;
 
 import com.dykim.AuthServer.model.dto.OtherUser;
+import com.dykim.AuthServer.model.dto.UserName;
 import com.dykim.AuthServer.service.UserInfoService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -37,6 +38,19 @@ public class UserInfoController {
         List<OtherUser> otherUserList = userInfoService.getAllUsersInfo();
 
         if(otherUserList.isEmpty()){
+            response.setStatus(204);
+            return "no user";
+        }
+
+        return otherUserList;
+    }
+
+    @ResponseBody
+    @GetMapping("match")
+    public Object getMatchUsersInfo(@RequestBody UserName userName, HttpServletResponse response){
+        List<OtherUser> otherUserList = userInfoService.getMatchUsersInfo(userName.getUserName());
+
+        if(otherUserList == null || otherUserList.isEmpty()){
             response.setStatus(204);
             return "no user";
         }
