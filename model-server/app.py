@@ -1,0 +1,280 @@
+# on python3.8
+import os
+import random
+import datetime
+import argparse
+import time
+import argparse
+import numpy as np
+from torchvision import models
+import torch.nn as nn
+import torch
+from facenet_pytorch import InceptionResnetV1, MTCNN
+import random
+import dlib
+import cv2
+import imutils
+from imutils.video import VideoStream
+from imutils import face_utils
+from moviepy.editor import *
+from moviepy.editor import VideoFileClip, concatenate_videoclips
+
+class FaceDistance:
+    def __init__(self, shape_predictor_path, thumbnail_path, face_embedding_penalty=None):
+        self.skip_frame_rate = 5                                  #(1)
+        self.minimax_frames = 5                                   #(2)
+        self.shape_predictor = shape_predictor_path               #(3)
+        self.face_embedding_penalty = face_embedding_penalty
+        self.thumbnail_path = thumbnail_path
+        self.thumbnail_list = []
+        
+    def extract_landmark(self, reference_clip, compare_clip):
+        # (1) 영상 저장 및 face landmark detect model 불러오기
+        self.clips =[reference_clip, compare_clip]                # (1)-a
+        detector = dlib.get_frontal_face_detector()               # (1)-b
+        predictor = dlib.shape_predictor(self.shape_predictor)    # (1)-c
+        clips_frame_info = []
+        k = 0
+
+        for clip in self.clips:
+            # (2) 각 영상의 정보를 저장하기 위해 loop마다 초기화하기
+            i=0                                                   # (2)-a
+            every_frame_info= []			                      # (2)-b
+
+            while True:
+                # (3) 각 영상에서 face Landmark 얻기
+                frame = clip.get_frame(i*1.0/clip.fps)            # (3)-a
+                i+=self.skip_frame_rate                           # (3)-b
+                if (i*1.0/clip.fps)> clip.duration:               # (3)-c
+                    break
+                
+                # if i % 500 == 0:
+                #     clip.save_frame(f'result/pp{i}.jpg', t = i*1.0/clip.fps)
+
+                frame = imutils.resize(frame, width=800)          # (3)-d
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)    # (3)-e
+                
+                rects = detector(gray, 0)                         # (3)-f
+                # rects = self.face_detection.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).detections
+                
+                # (4) 얻은 face Landmark를 가공해서 every_frame_info에 저장하기
+                if len(rects)>0:                                  # (4)-a
+                    max_width = 0
+                    max_rect = None                               # (4)-b
+                    for rect in rects:                            # (4)-c
+                        if int(rect.width()) > max_width:
+                            max_rect = rect
+                            max_width = rect.width()
+                    shape = predictor(gray, max_rect)             # (4)-d
+                    shape = face_utils.shape_to_np(shape)         # (4)-e
+                    every_frame_info.append(shape)                # (4)-f
+
+                    # 썸네일 조건 확인
+                    clip_w, _ = clip.size
+                    # print('max rect', max_rect)
+                    max_rect_ratio = max_rect.width() / clip_w
+                    # print('max rect ratio', max_rect_ratio)
+                    thumbnail_cond = (0.1 < max_rect_ratio) and (0.3 > max_rect_ratio)
+
+                    if thumbnail_cond & (len(self.thumbnail_list) < 31):
+                        self.thumbnail_list.append(frame)
+                                    
+                else:
+                    every_frame_info.append([])
+
+            # (5) 영상 Frame별 landmark 정보 clips_frame_info에 저장하기
+            clips_frame_info.append(np.array(every_frame_info))   # (5)-a
+
+        cv2.destroyAllWindows()
+        return clips_frame_info
+
+    def embedding_cosine_distance(self, reference_frame, compare_frame):
+        face_detector = MTCNN(select_largest=True)
+        embed_model = InceptionResnetV1(pretrained='vggface2').eval()
+        
+        reference_frame = np.array(reference_frame)
+        compare_frame = np.array(compare_frame)
+        try:
+            reference_frame_detected = face_detector(reference_frame)
+            compare_frame_detected = face_detector(compare_frame)
+        except:
+            cosine_dist = 1
+            # print('detect fail - embedding')
+            return cosine_dist
+        
+        reference_frame_embed = embed_model(reference_frame_detected.unsqueeze(0)).detach().numpy()
+        compare_frame_embed = embed_model(compare_frame_detected.unsqueeze(0)).detach().numpy()
+        reference_frame_embed = np.squeeze(reference_frame_embed)
+        compare_frame_embed = np.squeeze(compare_frame_embed)
+        cosine_dist = 1 - np.dot(reference_frame_embed, compare_frame_embed) / (np.linalg.norm(reference_frame_embed) * np.linalg.norm(compare_frame_embed))
+        return cosine_dist
+
+    def get_all_frame_distance(self, clips_frame_info, min_size):
+        dist_arr = []                                             # (1)
+        for i in range(min_size-1):                               # (2)
+            # (3)
+            if len(clips_frame_info[0][i])>0 and len(clips_frame_info[1][i+1])>0:
+            # (4)
+                l = 36
+                r = 45
+                left_eye = ((clips_frame_info[0][i][l][0] - clips_frame_info[1][i+1][l][0])**2 + 
+                    (clips_frame_info[0][i][l][1] - clips_frame_info[1][i+1][l][1])**2)**0.5
+                right_eye = ((clips_frame_info[0][i][r][0] - clips_frame_info[1][i+1][r][0])**2 + 
+                    (clips_frame_info[0][i][r][1] - clips_frame_info[1][i+1][r][1])**2)**0.5
+                total_diff = left_eye + right_eye
+                dist_arr.append(total_diff)                        # (5)
+            else:  
+                dist_arr.append(None)
+        return dist_arr
+
+    def distance(self, reference_clip, compare_clip):
+        # (1) 거리 계산에 필요한 정보들 먼저 얻기
+        # (1)-a
+        clips_frame_info = self.extract_landmark(reference_clip, compare_clip)
+        # (1)-b
+        min_size = min(len(clips_frame_info[0]),len(clips_frame_info[1]))
+        # (1)-c 
+        dist_arr = self.get_all_frame_distance(clips_frame_info, min_size)
+        # (1)-d
+        clips =[reference_clip,compare_clip]
+        minimax_frames = self.minimax_frames
+        min_diff = np.float('Inf')
+        min_idx = 0
+        # (2) 최소 거리가 되는 영상과 시간 찾기
+        # (2)-a
+        for i in range(min_size - (minimax_frames - 1)):
+            # (2)-b
+            start_minmax_idx = 0 if (i - minimax_frames)<0 else i - minimax_frames
+            # (2)-c
+            if (None not in dist_arr[start_minmax_idx :i + minimax_frames]):
+                # (2)-d
+                tmp_max = np.max(dist_arr[start_minmax_idx:i + minimax_frames])
+                if min_diff > tmp_max:
+                    min_diff = tmp_max
+                    min_idx = i
+        
+        # (3) Face Embedding Penalty 추가하기
+        if self.face_embedding_penalty != None and min_diff < np.float("Inf"):
+            ref_frame = reference_clip.get_frame(min_idx * 1.0/reference_clip.fps)
+            frame = compare_clip.get_frame(min_idx * 1.0/compare_clip.fps)
+            cosine_dist = self.embedding_cosine_distance(ref_frame, frame)
+            min_diff += cosine_dist * self.face_embedding_penalty
+        # (4) 두 영상 간의 최소 거리 정보 리턴
+        return min_diff, (min_idx*self.skip_frame_rate)/self.clips[0].fps
+
+class Crosscut:
+    def __init__(self, dist_obj, video_path, output_path):
+        self.videos_path = video_path 		# (1)
+        self.output_path = output_path 		# (2)
+        self.min_time = 1000.0 				# (3)
+        video_num = len(os.listdir(self.videos_path)) 	 # (4)
+        self.start_times = [0] * video_num 		         # (5)
+        # self.start_times = start_times
+        self.window_time = 10 				# (6)
+        self.padded_time = 4 				# (7)
+        self.dist_obj = dist_obj 		    # (8)
+        self.audioclip = None 				# (9)
+        self.extracted_clips_array = [] 	# (10)
+        self.con_clips = [] 				# (11)
+        self.clip_last = None
+    
+    def video_alignment(self):
+        for i in range(len(os.listdir(self.videos_path))):
+            video_path = os.path.join(self.videos_path, sorted(os.listdir(self.videos_path))[i])
+            clip = VideoFileClip(video_path)
+            clip = clip.subclip(self.start_times[i], clip.duration)
+            if self.min_time > clip.duration:
+                self.audioclip = clip.audio
+                self.min_time = clip.duration
+            self.extracted_clips_array.append(clip)
+        # print('LOGGER-- {} Video Will Be Mixed'.format(len(self.extracted_clips_array)))
+    
+    def select_next_clip(self, t, current_idx):
+        # (1) 거리 측정에 필요한 변수 초기화하기
+        cur_t = t
+        next_t = min(t+self.window_time, self.min_time)
+        
+        reference_clip = self.extracted_clips_array[current_idx].subclip(cur_t, next_t)
+        d = float("Inf")
+        cur_clip = None
+        min_idx = (current_idx+1)%len(self.extracted_clips_array)
+
+        # (2) 비교 영상들과 현재 영상의 거리 측정하기
+        for video_idx in range(len(self.extracted_clips_array)):
+            if video_idx == current_idx:
+                continue
+            clip = self.extracted_clips_array[video_idx].subclip(cur_t, next_t) 
+            cur_d, plus_frame = self.dist_obj.distance(reference_clip, clip) 
+            # print(current_idx, video_idx, cur_d, cur_t + plus_frame)
+            if d > cur_d:
+                d = cur_d
+                min_idx = video_idx
+                next_t = cur_t + plus_frame
+                cur_clip = reference_clip.subclip(0, plus_frame)
+        
+        # (3) 다음 교차편집 지점 전까지 현재 영상 저장하기
+        if cur_clip: 
+            clip = cur_clip 
+        else:
+            clip = reference_clip
+        self.con_clips.append(clip)
+        
+        # (4) 현재 시간을 갱신하고 다음에 사용할 영상 인덱스 반환하기
+        t = next_t
+        return t, min_idx
+        
+    def add_padding(self, t, next_idx):
+        # print("idx : {}".format(next_idx))
+        pad_clip = self.extracted_clips_array[next_idx].subclip(t, min(self.min_time,t+self.padded_time))
+        self.con_clips.append(pad_clip)
+        
+        t = min(self.min_time,t + self.padded_time)
+        return t, next_idx
+        
+    def write_video(self):
+        final_clip = concatenate_videoclips(self.con_clips)
+        if self.audioclip != None:
+            # print("Not None")
+            final_clip.audio = self.audioclip
+        final_clip.write_videofile(self.output_path)
+        self.clip_last = final_clip
+        return final_clip    
+
+    def generate_video(self):
+        self.video_alignment()
+        t = 3
+        current_idx = 0
+        self.con_clips.append(self.extracted_clips_array[current_idx].subclip(0, min(t, int(self.min_time))))
+        while t < int(self.min_time):
+            t, min_idx = self.select_next_clip(t, current_idx)
+            t, current_idx = self.add_padding(t, min_idx)
+        final_clip = self.write_video()
+        return final_clip
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()    
+    parser.add_argument('--video_path', help='videos directory path')
+    parser.add_argument('--result_path', help='save path of output "path/name.mp4" format')
+    parser.add_argument('--thumbnail_path', help='thumbnails directory path "path/name.jpg or png format"')    
+    parser.add_argument('--shape_predictor_path', default='shape_predictor_68_face_landmarks.dat', help='path of "shape_predictor_68_face_landmarks.dat"-landmarks predictor')
+    
+    args = parser.parse_args()
+    video_path = args.video_path
+    result_path = args.result_path
+    shape_predictor_path = args.shape_predictor_path
+    thumbnail_path = args.thumbnail_path
+
+    # ~.py --method random
+    face_distance = FaceDistance(shape_predictor_path, thumbnail_path)
+    
+    cross_cut = Crosscut(face_distance, video_path, result_path)
+    thumbnail_list = face_distance.thumbnail_list
+
+    cross_cut.generate_video()
+    
+    # save thumbnail
+    if len(thumbnail_list):
+        cv2.imwrite(thumbnail_path, cv2.cvtColor(thumbnail_list[random.randint(0, len(thumbnail_list))], cv2.COLOR_BGR2RGB))
+    else:
+        # no thumbnail -> last part
+        cross_cut.clip_last.save_frame(thumbnail_path, t = cross_cut.clip_last.duration - 20)
